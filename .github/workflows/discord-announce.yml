@@ -1,0 +1,73 @@
+# Kommt ins Repo "afterlight-releases" unter .github/workflows/discord-announce.yml.
+# Postet jede neue Version automatisch in Discord: normale Releases in #changelog, Pre-Releases in #beta-changelog.
+# Benoetigte Repo-Einstellungen (Settings -> Secrets and variables -> Actions):
+#   Secrets:   DISCORD_WEBHOOK_UPDATES, DISCORD_WEBHOOK_BETA (optional)
+#   Variables: DISCORD_ROLE_UPDATES, DISCORD_ROLE_BETA (optional, Rollen-IDs fuer den Ping)
+name: Discord announcement
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag erneut ankuendigen (z. B. v0.11.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release laden
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh api "repos/${{ github.repository }}/releases/tags/$TAG" > release.json
+
+      - name: An Discord senden
+        env:
+          HOOK_UPDATES: ${{ secrets.DISCORD_WEBHOOK_UPDATES }}
+          HOOK_BETA: ${{ secrets.DISCORD_WEBHOOK_BETA }}
+          ROLE_UPDATES: ${{ vars.DISCORD_ROLE_UPDATES }}
+          ROLE_BETA: ${{ vars.DISCORD_ROLE_BETA }}
+        run: |
+          cat > announce.mjs <<'EOF'
+          import fs from 'node:fs';
+          const r = JSON.parse(fs.readFileSync('release.json', 'utf8'));
+          const beta = r.prerelease;
+          const hook = beta ? (process.env.HOOK_BETA || '') : process.env.HOOK_UPDATES;
+          if (!hook) { console.log(beta ? 'Kein Beta-Webhook gesetzt, uebersprungen.' : 'Secret DISCORD_WEBHOOK_UPDATES fehlt.'); process.exit(beta ? 0 : 1); }
+          const role = beta ? process.env.ROLE_BETA : process.env.ROLE_UPDATES;
+          const version = r.tag_name.replace(/^v/, '');
+          // Release-Text kuerzen und Markdown-Ueberschriften fuer Discord vereinfachen
+          let notes = (r.body || '').replace(/\r/g, '').replace(/^#{1,6}\s*(.+)$/gm, '**$1**').trim();
+          if (!notes || notes === `AFTERLIGHT ${version}`) notes = 'Bug fixes and improvements.';
+          if (notes.length > 3500) notes = notes.slice(0, 3500).replace(/\n[^\n]*$/, '') + `\n\n… [full notes](${r.html_url})`;
+          const zip = (r.assets || []).find(a => a.name.endsWith('.zip'));
+          const mb = zip ? ` · ${(zip.size / 1048576).toFixed(0)} MB` : '';
+          const body = {
+            content: role ? `<@&${role}>` : undefined,
+            allowed_mentions: { roles: role ? [role] : [] },
+            embeds: [{
+              color: beta ? 0x8b9cff : 0xffffff,
+              author: { name: beta ? 'AFTERLIGHT Beta' : 'AFTERLIGHT Update' },
+              title: `${beta ? '🧪' : '🚀'} Version ${version} is out`,
+              url: r.html_url,
+              description: `${notes}\n\n**How to update:** AFTERLIGHT updates itself automatically – just restart the app.`,
+              fields: zip ? [{ name: 'Download', value: `[${zip.name}](${zip.browser_download_url})${mb}`, inline: true }] : [],
+              footer: { text: 'afterlight.info' },
+              timestamp: r.published_at,
+            }],
+          };
+          const res = await fetch(hook + '?wait=true', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          if (!res.ok) { console.error('Discord antwortet', res.status, await res.text()); process.exit(1); }
+          const msg = await res.json();
+          // In Ankuendigungskanaelen veroeffentlichen, damit Server, die #changelog folgen, es auch bekommen.
+          // (Geht nur mit Bot-Token; ohne Token bleibt die Nachricht im eigenen Server – kein Fehler.)
+          console.log('Gepostet:', msg.id);
+          EOF
+          node announce.mjs
