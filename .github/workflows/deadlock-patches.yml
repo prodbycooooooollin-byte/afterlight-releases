@@ -1,5 +1,5 @@
 # Kommt ins Repo "afterlight-releases" unter .github/workflows/deadlock-patches.yml.
-# Prueft alle 30 Minuten die offiziellen Deadlock-Patchnotes (ueber die Deadlock-API) und postet neue in #deadlock-patches.
+# Prueft alle 30 Minuten die offiziellen Deadlock-Ankuendigungen von Valve auf Steam (Updates, Patches) und postet neue in #deadlock-patches.
 # Benoetigt: Secret DISCORD_WEBHOOK_PATCHES, optional Variable DISCORD_ROLE_PATCHES (Rollen-ID fuer den Ping).
 name: Deadlock patch notes
 
@@ -39,34 +39,39 @@ jobs:
           cat > patches.mjs <<'EOF'
           import fs from 'node:fs';
           if (!process.env.HOOK) { console.error('Secret DISCORD_WEBHOOK_PATCHES fehlt.'); process.exit(1); }
-          const res = await fetch('https://api.deadlock-api.com/v1/patches', { headers: { 'User-Agent': 'AFTERLIGHT-Discord' } });
-          if (!res.ok) { console.log('Deadlock-API nicht erreichbar:', res.status); process.exit(0); }
-          const id = p => Number(/thread:(\d+)/.exec(p.guid?.text || '')?.[1] || /\.(\d+)\/?$/.exec(p.link || '')?.[1] || 0);
-          const all = (await res.json()).filter(p => p.title && p.link && id(p)).sort((a, b) => id(a) - id(b));
+          // Offizielle Deadlock-Ankündigungen von Valve auf Steam (Updates, Patches, neue Helden). App-ID 1422450.
+          const res = await fetch('https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=1422450&count=15&maxlength=0&feeds=steam_community_announcements&format=json', { headers: { 'User-Agent': 'AFTERLIGHT-Discord' } });
+          if (!res.ok) { console.log('Steam-News nicht erreichbar:', res.status); process.exit(0); }
+          const all = ((await res.json())?.appnews?.newsitems || []).filter(n => n.title && n.gid).sort((a, b) => a.date - b.date);
           const raw = fs.readFileSync('since.txt', 'utf8').trim();
-          // Erster Lauf ohne Vorgaenger: nur die letzte Stunde zaehlt als neu
-          const since = Date.parse(raw) || Date.now() - 3600_000;
-          // Bereits bekannt = alles, was vor dem letzten Lauf veroeffentlicht war. Neu = hoehere Thread-ID.
-          // So loesen nachtraeglich bearbeitete alte Patches keinen erneuten Post aus.
-          const known = Math.max(0, ...all.filter(p => Date.parse(p.pub_date) <= since).map(id));
-          let fresh = all.filter(p => id(p) > known && Date.parse(p.pub_date) > since).slice(-3);
+          // Erster Lauf ohne Vorgaenger: nur die letzte Stunde zaehlt als neu. Neu = nach dem letzten erfolgreichen Lauf veroeffentlicht.
+          const since = (Date.parse(raw) || Date.now() - 3600_000) / 1000;
+          let fresh = all.filter(n => n.date > since).slice(-3);
           if (process.env.POST_LATEST === 'true') fresh = all.slice(-1);
-          if (!fresh.length) { console.log('Keine neuen Patches.'); process.exit(0); }
-          const text = html => html.replace(/<br\s*\/?>/gi, '\n').replace(/<li[^>]*>/gi, '\n• ').replace(/<[^>]+>/g, '')
+          if (!fresh.length) { console.log('Keine neuen Ankündigungen.'); process.exit(0); }
+          const IMG = 'https://clan.akamai.steamstatic.com/images/';
+          const image = c => { const m = /\[img(?: src=")?\{STEAM_CLAN(?:_LOC)?_IMAGE\}\/([^"\]\s]+)/i.exec(c || ''); return m ? IMG + m[1] : null; };
+          const text = c => (c || '')
+            .replace(/\[img[^\]]*\][\s\S]*?\[\/img\]/gi, '').replace(/\{STEAM_CLAN(?:_LOC)?_IMAGE\}\S*/g, '')
+            .replace(/\[\*\]/g, '\n• ').replace(/\[h[1-6]\]([\s\S]*?)\[\/h[1-6]\]/gi, '\n**$1**\n').replace(/\[b\]([\s\S]*?)\[\/b\]/gi, '**$1**')
+            .replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, '[$2]($1)').replace(/\[\/?[a-z0-9*]+(?:=[^\]]*)?\]/gi, '').replace(/<[^>]+>/g, '')
             .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'")
-            .replace(/[ \t]+/g, ' ').replace(/^ +| +$/gm, '').replace(/\n\s*\n+/g, '\n').trim();
-          for (const p of fresh) {
-            let body = text(p.content_encoded || '');
+            .replace(/[ \t]+/g, ' ').replace(/^ +| +$/gm, '').replace(/\n\s*\n+/g, '\n\n').trim();
+          for (const n of fresh) {
+            const link = `https://store.steampowered.com/news/app/1422450/view/${n.gid}`;
+            let body = text(n.contents);
             if (body.length > 1500) body = body.slice(0, 1500).replace(/\n[^\n]*$/, '') + '\n…';
+            const img = image(n.contents);
             const msg = {
               content: process.env.ROLE ? `<@&${process.env.ROLE}>` : undefined,
               allowed_mentions: { roles: process.env.ROLE ? [process.env.ROLE] : [] },
-              embeds: [{ color: 0xfb7185, author: { name: 'Deadlock · Patch notes' }, title: p.title.slice(0, 250), url: p.link,
-                description: `${body}\n\n**[Read the full patch notes →](${p.link})**`, footer: { text: p.dc_creator ? `by ${p.dc_creator} · playdeadlock.com` : 'playdeadlock.com' }, timestamp: p.pub_date }],
+              embeds: [{ color: 0xfb7185, author: { name: 'Deadlock · Patch notes' }, title: n.title.slice(0, 250), url: link,
+                description: `${body}\n\n**[Read the full patch notes →](${link})**`, ...(img ? { image: { url: img } } : {}),
+                footer: { text: 'Valve · Steam' }, timestamp: new Date(n.date * 1000).toISOString() }],
             };
             const r = await fetch(process.env.HOOK + '?wait=true', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(msg) });
             if (!r.ok) { console.error('Discord', r.status, await r.text()); process.exit(1); }
-            console.log('Gepostet:', p.title);
+            console.log('Gepostet:', n.title);
           }
           EOF
           node patches.mjs
