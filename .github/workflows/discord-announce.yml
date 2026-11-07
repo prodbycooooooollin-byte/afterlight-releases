@@ -13,6 +13,9 @@ on:
       tag:
         description: 'Tag erneut ankuendigen (z. B. v0.11.0)'
         required: true
+      message_id:
+        description: 'Optional: bestehende Discord-Nachricht ersetzen statt neu posten (ohne erneuten Ping)'
+        required: false
 
 permissions:
   contents: read
@@ -34,6 +37,7 @@ jobs:
           HOOK_BETA: ${{ secrets.DISCORD_WEBHOOK_BETA }}
           ROLE_UPDATES: ${{ vars.DISCORD_ROLE_UPDATES }}
           ROLE_BETA: ${{ vars.DISCORD_ROLE_BETA }}
+          EDIT_ID: ${{ inputs.message_id }}
         run: |
           cat > announce.mjs <<'EOF'
           import fs from 'node:fs';
@@ -63,7 +67,8 @@ jobs:
               timestamp: r.published_at,
             }],
           };
-          const res = await fetch(hook + '?wait=true', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const edit = /^\d{15,22}$/.test(process.env.EDIT_ID || '') ? process.env.EDIT_ID : null;
+          const res = await fetch(edit ? `${hook}/messages/${edit}` : hook + '?wait=true', { method: edit ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           if (!res.ok) { console.error('Discord antwortet', res.status, await res.text()); process.exit(1); }
           const msg = await res.json();
           // In Ankuendigungskanaelen veroeffentlichen, damit Server, die #changelog folgen, es auch bekommen.
